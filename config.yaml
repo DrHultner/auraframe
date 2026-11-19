@@ -4,7 +4,9 @@ display:
   fullscreen: true
   overlay: true
   fade_ms: 400
-  idle_timeout_s: 45
+  # Keep album art until a different track is recognized (ignore idle_timeout_s for live matches)
+  hold_until_next_track: true
+  idle_timeout_s: 45   # used only when hold_until_next_track is false (or demo-art mode)
   idle_color: [12, 12, 18]
   background_color: [0, 0, 0]
   overlay_bg_alpha: 140

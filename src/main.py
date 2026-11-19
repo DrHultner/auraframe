@@ -434,14 +434,18 @@ def main() -> int:
 
     demo_shown = False
     demo_at = time.monotonic() + max(0.0, args.demo_delay)
-    idle_timeout = float(config.get("display", {}).get("idle_timeout_s", 45))
+    display_cfg = config.get("display", {})
+    idle_timeout = float(display_cfg.get("idle_timeout_s", 45))
+    hold_until_next = bool(display_cfg.get("hold_until_next_track", True))
     last_art_at: float | None = None
     last_track_key: str | None = None
     state = "idle"
+    art_is_recognized = False  # True once we show a real AudD match
 
     logger.info(
-        "AuraFrame running live=%s root=%s",
+        "AuraFrame running live=%s hold_until_next_track=%s root=%s",
         live,
+        hold_until_next,
         config.get("_root"),
     )
 
@@ -459,6 +463,7 @@ def main() -> int:
                     )
                     last_art_at = time.monotonic()
                     state = "artwork"
+                    art_is_recognized = False
                     demo_shown = True
                 else:
                     logger.error("Demo art unavailable: %s", args.demo_art)
@@ -482,26 +487,39 @@ def main() -> int:
                     )
                     last_art_at = time.monotonic()
                     state = "artwork"
+                    art_is_recognized = False
 
                 result = worker.take_result()
                 if result is not None:
                     same = last_track_key == result.track_key
-                    last_track_key = result.track_key
                     last_art_at = time.monotonic()
                     state = "artwork"
                     if same:
                         logger.info("Same track still playing: %s", result.track_key)
                     else:
-                        _apply_result(display, artwork, result)
+                        last_track_key = result.track_key
+                        if _apply_result(display, artwork, result):
+                            art_is_recognized = True
+                            logger.info(
+                                "Holding artwork until next track (%s — %s)",
+                                result.track.artist,
+                                result.track.title,
+                            )
                 elif worker.take_miss():
                     logger.info("Identify finished with no match")
 
+            # Recognized art stays up until a different track is identified.
+            # Timeout only applies to demo / non-recognized art, or if hold is disabled.
             if state == "artwork" and last_art_at is not None:
-                if time.monotonic() - last_art_at >= idle_timeout:
+                should_timeout = idle_timeout > 0 and (
+                    not hold_until_next or not art_is_recognized
+                )
+                if should_timeout and time.monotonic() - last_art_at >= idle_timeout:
                     display.show_idle()
                     state = "idle"
                     last_art_at = None
                     last_track_key = None
+                    art_is_recognized = False
 
     finally:
         if live:
