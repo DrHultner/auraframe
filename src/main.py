@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .artwork import ArtworkManager
 from .audio_monitor import AudioMonitor, AudioSample
-from .config import load_config
+from .config import describe_env, load_config
 from .display import DisplayEngine, TrackInfo
 from .recognizer import RecognitionResult, Recognizer
 
@@ -78,7 +78,33 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="With --recognize-file, also show artwork on the display",
     )
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="Print config/.env/token diagnostics and exit",
+    )
     return p.parse_args()
+
+
+def cmd_check(config: dict) -> int:
+    root = Path(config["_root"])
+    info = describe_env(root)
+    print(f"root:            {info['root']}")
+    print(f"config:          {config.get('_config_path')}")
+    print(f"package_root:    {config.get('_package_root')}")
+    print(f"env_files:       {config.get('_env_files')}")
+    print(f"env_path:        {info['env_path']}")
+    print(f"env_exists:      {info['env_exists']}")
+    print(f"token_in_file:   {info['token_in_file']}")
+    print(f"token_in_environ:{info['token_in_environ']}")
+    print(f"token_mask:      {info['token_mask']}")
+    recognizer = Recognizer(config)
+    print(f"recognizer_ok:   {recognizer.configured}")
+    if not recognizer.configured:
+        print("\nFix: create .env next to config.yaml with:")
+        print("  AUDD_API_TOKEN=your_token_here")
+        return 1
+    return 0
 
 
 def cmd_list_devices() -> int:
@@ -194,6 +220,7 @@ class _IdentifyWorker:
         self._lock = threading.Lock()
         self._busy = False
         self._result: RecognitionResult | None = None
+        self._done_miss = False
         self._last_key: str | None = None
 
     @property
@@ -204,8 +231,11 @@ class _IdentifyWorker:
     def submit(self, sample: AudioSample) -> bool:
         with self._lock:
             if self._busy:
+                logger.info("Identify busy; deferring %s", Path(sample.path).name)
                 return False
             self._busy = True
+            self._done_miss = False
+        logger.info("Identify thread start for %s", Path(sample.path).name)
         thread = threading.Thread(target=self._run, args=(sample,), daemon=True)
         thread.start()
         return True
@@ -216,6 +246,12 @@ class _IdentifyWorker:
             self._result = None
             return result
 
+    def take_miss(self) -> bool:
+        with self._lock:
+            miss = self._done_miss
+            self._done_miss = False
+            return miss
+
     def _run(self, sample: AudioSample) -> None:
         result = None
         try:
@@ -225,11 +261,16 @@ class _IdentifyWorker:
         finally:
             with self._lock:
                 if result is not None:
-                    # Still deliver duplicates so caller can refresh hold timer;
-                    # orchestrator decides whether to re-render.
                     self._result = result
                     self._last_key = result.track_key
+                else:
+                    self._done_miss = True
                 self._busy = False
+                logger.info(
+                    "Identify thread done for %s result=%s",
+                    Path(sample.path).name,
+                    "match" if result else "none",
+                )
 
 
 def _apply_result(
@@ -259,6 +300,9 @@ def main() -> int:
 
     if args.list_devices:
         return cmd_list_devices()
+
+    if args.check:
+        return cmd_check(config)
 
     if args.recognize_file is not None:
         return cmd_recognize_file(
@@ -295,7 +339,12 @@ def main() -> int:
     display.start()
     if live:
         if not recognizer.configured:
-            logger.warning("Live mode without API token — gate only, no identify")
+            logger.error(
+                "Live mode has no API token — AudD will NOT be called. "
+                "Run: auraframe --check"
+            )
+        else:
+            logger.info("Live recognition enabled")
         audio.start()
     display.show_idle()
 
@@ -306,7 +355,11 @@ def main() -> int:
     last_track_key: str | None = None
     state = "idle"
 
-    logger.info("AuraFrame running (phase 4: recognition%s)", " live" if live else "")
+    logger.info(
+        "AuraFrame running live=%s root=%s",
+        live,
+        config.get("_root"),
+    )
 
     try:
         while not stopping:
@@ -330,14 +383,17 @@ def main() -> int:
             if live and worker is not None:
                 sample = audio.poll()
                 if sample and recognizer.configured:
-                    if worker.submit(sample):
-                        logger.info("Identify queued for %s", Path(sample.path).name)
+                    worker.submit(sample)
                 elif sample and not recognizer.configured:
+                    logger.error(
+                        "Sample captured but token missing; skip AudD (%s)",
+                        sample.path,
+                    )
                     display.show_artwork(
                         Path(config["_assets"]) / "demo_art.png",
                         TrackInfo(
                             title="Music detected",
-                            artist=f"rms={sample.rms:.3f} (no API token)",
+                            artist="no API token — run auraframe --check",
                         ),
                     )
                     last_art_at = time.monotonic()
@@ -353,6 +409,8 @@ def main() -> int:
                         logger.info("Same track still playing: %s", result.track_key)
                     else:
                         _apply_result(display, artwork, result)
+                elif worker.take_miss():
+                    logger.info("Identify finished with no match")
 
             if state == "artwork" and last_art_at is not None:
                 if time.monotonic() - last_art_at >= idle_timeout:

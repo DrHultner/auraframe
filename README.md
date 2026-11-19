@@ -39,6 +39,11 @@ auraframe --live --windowed
 
 Requires `AUDD_API_TOKEN` in the project `.env` (same folder as `config.yaml`).
 
+```bash
+# Diagnose token / paths
+auraframe --check
+```
+
 Keys: `Esc` or `q` to quit.
 
 ## Config notes
