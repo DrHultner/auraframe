@@ -12,6 +12,7 @@ from typing import Any
 import requests
 
 from .audio_monitor import AudioSample
+from .config import mask_token
 from .display import TrackInfo
 
 logger = logging.getLogger(__name__)
@@ -75,15 +76,20 @@ class Recognizer:
         self._memory: dict[str, tuple[float, RecognitionResult]] = {}
         self._last_result: RecognitionResult | None = None
 
+        env_files = config.get("_env_files") or []
         if not self._token:
             logger.warning(
-                "No recognition API token (%s); identify() will no-op until set in .env",
+                "No recognition API token (%s). env_files=%s root=%s",
                 self._token_env,
+                env_files,
+                config.get("_root"),
             )
         else:
             logger.info(
-                "Recognizer ready provider=%s cache_dir=%s",
+                "Recognizer ready provider=%s token=%s env_files=%s cache_dir=%s",
                 self._provider,
+                mask_token(self._token),
+                env_files,
                 self._cache_dir,
             )
 
