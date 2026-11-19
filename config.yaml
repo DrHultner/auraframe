@@ -16,12 +16,16 @@ audio:
   sample_rate: 44100
   channels: 1
   block_size: 2048
-  sample_seconds: 10
+  sample_seconds: 12
   gate_window_s: 1.5
   gate_rms_threshold: 0.02
   gate_band_ratio_min: 0.25
   gate_min_hz: 200
   gate_max_hz: 5000
+  gate_hits_required: 3   # sustained music before capture
+  normalize: true         # boost quiet ambient mic levels for AudD
+  target_peak: 0.9
+  max_gain: 40.0
   cooldown_s: 30
   check_interval_s: 1.0
   silence_interval_s: 2.5

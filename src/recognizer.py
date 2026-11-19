@@ -161,7 +161,16 @@ class Recognizer:
             "return": self._return_meta,
         }
         size = path.stat().st_size
-        logger.info("Calling AudD api=%s file=%s bytes=%s", self._api_url, path.name, size)
+        stats = self._wav_stats(path)
+        logger.info(
+            "Calling AudD api=%s file=%s bytes=%s duration=%.1fs peak=%.4f rms=%.4f",
+            self._api_url,
+            path.name,
+            size,
+            stats.get("duration_s", 0.0),
+            stats.get("peak", 0.0),
+            stats.get("rms", 0.0),
+        )
         with path.open("rb") as fh:
             files = {"file": (path.name, fh, "audio/wav")}
             resp = self._session.post(
@@ -181,9 +190,41 @@ class Recognizer:
 
         result = payload.get("result")
         if not result:
+            logger.info(
+                "AudD returned no match (status=%s). Tips: play louder/clearer, "
+                "move mic closer, or re-test after normalize with a fresh sample.",
+                payload.get("status"),
+            )
             return None
 
         return self._parse_audd_result(result)
+
+    @staticmethod
+    def _wav_stats(path: Path) -> dict[str, float]:
+        try:
+            import wave
+
+            import numpy as np
+
+            with wave.open(str(path), "rb") as wf:
+                frames = wf.readframes(wf.getnframes())
+                rate = wf.getframerate()
+                width = wf.getsampwidth()
+                ch = wf.getnchannels()
+            if width == 2:
+                data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+            else:
+                return {}
+            if ch > 1:
+                data = data.reshape(-1, ch).mean(axis=1)
+            return {
+                "duration_s": float(data.size / max(rate, 1)),
+                "peak": float(np.max(np.abs(data))) if data.size else 0.0,
+                "rms": float(np.sqrt(np.mean(np.square(data)))) if data.size else 0.0,
+            }
+        except Exception:
+            logger.debug("Could not analyze wav %s", path, exc_info=True)
+            return {}
 
     def _parse_audd_result(self, result: dict[str, Any]) -> RecognitionResult:
         title = str(result.get("title") or "").strip()

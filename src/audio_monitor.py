@@ -58,6 +58,10 @@ class AudioMonitor:
         self._cooldown_s = float(cfg.get("cooldown_s", 30))
         self._check_interval_s = float(cfg.get("check_interval_s", 1.0))
         self._silence_interval_s = float(cfg.get("silence_interval_s", 2.5))
+        self._gate_hits_required = int(cfg.get("gate_hits_required", 3))
+        self._normalize = bool(cfg.get("normalize", True))
+        self._target_peak = float(cfg.get("target_peak", 0.9))
+        self._max_gain = float(cfg.get("max_gain", 40.0))
         self._dtype = "float32"
 
         sample_dir = cfg.get("sample_dir", "~/.cache/auraframe/samples")
@@ -73,6 +77,7 @@ class AudioMonitor:
         self._last_check_at = 0.0
         self._last_sample_at = 0.0
         self._last_music_at = 0.0
+        self._music_hits = 0
         self._last_reading = GateReading(0.0, 0.0, False)
         self._frames_seen = 0
 
@@ -142,17 +147,24 @@ class AudioMonitor:
         self._last_reading = reading
         if reading.music_likely:
             self._last_music_at = now
+            self._music_hits += 1
             logger.info(
-                "Music likely rms=%.4f band_ratio=%.3f",
+                "Music likely hit=%s/%s rms=%.4f band_ratio=%.3f",
+                self._music_hits,
+                self._gate_hits_required,
                 reading.rms,
                 reading.band_ratio,
             )
         else:
+            self._music_hits = 0
             logger.debug(
                 "No music rms=%.4f band_ratio=%.3f",
                 reading.rms,
                 reading.band_ratio,
             )
+            return None
+
+        if self._music_hits < self._gate_hits_required:
             return None
 
         if now - self._last_sample_at < self._cooldown_s:
@@ -245,15 +257,40 @@ class AudioMonitor:
             )
             return None
 
+        peak_in = float(np.max(np.abs(samples))) if samples.size else 0.0
+        rms_in = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+        samples, gain = self._normalize_audio(samples)
+        peak_out = float(np.max(np.abs(samples))) if samples.size else 0.0
+        rms_out = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+
         ts = time.strftime("%Y%m%d-%H%M%S")
         path = self._sample_dir / f"sample-{ts}.wav"
         self._write_wav(path, samples)
+        logger.info(
+            "Sample audio in_peak=%.4f in_rms=%.4f gain=%.1fx out_peak=%.4f out_rms=%.4f",
+            peak_in,
+            rms_in,
+            gain,
+            peak_out,
+            rms_out,
+        )
         return AudioSample(
             path=str(path),
             duration_s=samples.size / float(self._sample_rate),
-            rms=reading.rms,
+            rms=rms_out if rms_out > 0 else reading.rms,
             band_ratio=reading.band_ratio,
         )
+
+    def _normalize_audio(self, samples: np.ndarray) -> tuple[np.ndarray, float]:
+        if not self._normalize or samples.size == 0:
+            return samples, 1.0
+        peak = float(np.max(np.abs(samples)))
+        if peak < 1e-6:
+            return samples, 1.0
+        gain = min(self._target_peak / peak, self._max_gain)
+        if gain < 1.01:
+            return samples, 1.0
+        return (samples * gain).astype(np.float32, copy=False), float(gain)
 
     def _get_recent(self, seconds: float) -> np.ndarray:
         n = int(seconds * self._sample_rate)
