@@ -17,6 +17,46 @@ from .display import TrackInfo
 
 logger = logging.getLogger(__name__)
 
+# Documented AudD error codes (https://docs.audd.io/ — Common errors)
+# API may return ~40 codes; unknown codes still log raw message from payload.
+AUDD_ERROR_CODES: dict[int, str] = {
+    51: "Napster metadata requested but Napster is discontinued (warning)",
+    300: "Fingerprinting error (audio often too small/short or unusable)",
+    400: "Audio file too large (standard endpoint max 10 MB)",
+    500: "Invalid audio file",
+    600: "Incorrect audio URL",
+    700: (
+        "No file received for recognition "
+        "(use multipart/form-data POST to https://api.audd.io/)"
+    ),
+    900: "Invalid API token",
+    901: "No api_token passed and limit reached (obtain a token from the dashboard)",
+}
+
+
+@dataclass(frozen=True)
+class AudDError:
+    code: int | None
+    message: str
+    raw: Any = None
+
+    @property
+    def known_meaning(self) -> str | None:
+        if self.code is None:
+            return None
+        return AUDD_ERROR_CODES.get(int(self.code))
+
+    def format(self) -> str:
+        parts: list[str] = []
+        if self.code is not None:
+            parts.append(f"#{self.code}")
+        if self.message:
+            parts.append(self.message)
+        meaning = self.known_meaning
+        if meaning and meaning not in (self.message or ""):
+            parts.append(f"[{meaning}]")
+        return " ".join(parts) if parts else repr(self.raw)
+
 
 @dataclass
 class RecognitionResult:
@@ -130,8 +170,7 @@ class Recognizer:
         try:
             result = self._identify_audd(path)
         except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else "?"
-            logger.error("Recognition HTTP error %s: %s", status, exc)
+            self._log_http_error(exc)
             return None
         except requests.RequestException:
             logger.exception("Recognition network error")
@@ -141,7 +180,7 @@ class Recognizer:
             return None
 
         if result is None:
-            logger.info("No match for sample %s", path.name)
+            # Detailed reason already logged inside _identify_audd
             return None
 
         self._cache_put(file_key, result)
@@ -180,24 +219,159 @@ class Recognizer:
                 timeout=self._timeout_s,
             )
         logger.info("AudD HTTP %s", resp.status_code)
-        resp.raise_for_status()
-        payload = resp.json()
 
-        if payload.get("status") == "error":
-            err = payload.get("error") or payload
-            logger.error("AudD error: %s", err)
+        payload = self._parse_payload(resp)
+        if payload is None:
+            resp.raise_for_status()
+            logger.error("AudD returned non-JSON body: %s", resp.text[:500])
             return None
 
+        # HTTP error with JSON body still carries AudD error codes
+        if resp.status_code >= 400:
+            err = self._extract_error(payload)
+            logger.error(
+                "AudD HTTP %s with API error %s payload=%s",
+                resp.status_code,
+                err.format(),
+                self._brief_payload(payload),
+            )
+            return None
+
+        self._log_warnings(payload)
+
+        status = str(payload.get("status") or "").lower()
+        if status == "error":
+            err = self._extract_error(payload)
+            logger.error(
+                "AudD API error %s payload=%s",
+                err.format(),
+                self._brief_payload(payload),
+            )
+            return None
+
+        if status and status != "success":
+            logger.warning(
+                "AudD unexpected status=%r payload=%s",
+                status,
+                self._brief_payload(payload),
+            )
+
         result = payload.get("result")
-        if not result:
+        if result is None or result == [] or result == {}:
             logger.info(
-                "AudD returned no match (status=%s). Tips: play louder/clearer, "
-                "move mic closer, or re-test after normalize with a fresh sample.",
-                payload.get("status"),
+                "AudD no match for %s (status=%s result=%r). "
+                "Not an API error — fingerprint found no song. "
+                "Try louder/clearer audio or mic closer to the source.",
+                path.name,
+                status or "?",
+                result,
+            )
+            return None
+
+        if not isinstance(result, dict):
+            logger.error(
+                "AudD unexpected result type=%s payload=%s",
+                type(result).__name__,
+                self._brief_payload(payload),
             )
             return None
 
         return self._parse_audd_result(result)
+
+    def _log_http_error(self, exc: requests.HTTPError) -> None:
+        resp = exc.response
+        status = resp.status_code if resp is not None else "?"
+        if resp is None:
+            logger.error("Recognition HTTP error %s: %s", status, exc)
+            return
+        payload = self._parse_payload(resp)
+        if payload is not None:
+            err = self._extract_error(payload)
+            logger.error(
+                "Recognition HTTP %s AudD error %s payload=%s",
+                status,
+                err.format(),
+                self._brief_payload(payload),
+            )
+            return
+        logger.error(
+            "Recognition HTTP %s: %s body=%s",
+            status,
+            exc,
+            (resp.text or "")[:500],
+        )
+
+    def _log_warnings(self, payload: dict[str, Any]) -> None:
+        warnings = payload.get("warnings")
+        if not warnings:
+            # Some responses nest a single warning object
+            maybe = payload.get("warning")
+            if maybe:
+                warnings = [maybe]
+        if not warnings:
+            return
+        if not isinstance(warnings, list):
+            warnings = [warnings]
+        for item in warnings:
+            err = self._extract_error({"error": item} if not isinstance(item, dict) or "error_code" in item or "error_message" in item else item)
+            # Prefer direct parse when item is already error-shaped
+            if isinstance(item, dict):
+                err = self._coerce_error_dict(item)
+            logger.warning("AudD warning %s", err.format())
+
+    @staticmethod
+    def _parse_payload(resp: requests.Response) -> dict[str, Any] | None:
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    @classmethod
+    def _extract_error(cls, payload: dict[str, Any]) -> AudDError:
+        err_obj = payload.get("error")
+        if isinstance(err_obj, dict):
+            return cls._coerce_error_dict(err_obj)
+        if isinstance(err_obj, str):
+            return AudDError(code=None, message=err_obj, raw=err_obj)
+        if isinstance(err_obj, int):
+            return AudDError(
+                code=err_obj,
+                message=AUDD_ERROR_CODES.get(err_obj, ""),
+                raw=err_obj,
+            )
+        # Flat payload variants
+        if "error_code" in payload or "error_message" in payload:
+            return cls._coerce_error_dict(payload)
+        return AudDError(code=None, message=str(err_obj or payload.get("status") or "unknown"), raw=payload)
+
+    @staticmethod
+    def _coerce_error_dict(data: dict[str, Any]) -> AudDError:
+        code_raw = data.get("error_code", data.get("code", data.get("errorCode")))
+        code: int | None
+        try:
+            code = int(code_raw) if code_raw is not None and str(code_raw).strip() != "" else None
+        except (TypeError, ValueError):
+            code = None
+        message = str(
+            data.get("error_message")
+            or data.get("message")
+            or data.get("errorMessage")
+            or ""
+        ).strip()
+        if not message and code is not None:
+            message = AUDD_ERROR_CODES.get(code, "")
+        return AudDError(code=code, message=message, raw=data)
+
+    @staticmethod
+    def _brief_payload(payload: dict[str, Any]) -> str:
+        try:
+            text = json.dumps(payload, ensure_ascii=True, default=str)
+        except TypeError:
+            text = repr(payload)
+        if len(text) > 800:
+            return text[:800] + "..."
+        return text
 
     @staticmethod
     def _wav_stats(path: Path) -> dict[str, float]:
