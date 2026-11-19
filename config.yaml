@@ -1,0 +1,35 @@
+display:
+  width: 1920
+  height: 1200
+  fullscreen: true
+  overlay: true
+  fade_ms: 400
+  idle_timeout_s: 45
+  idle_color: [12, 12, 18]
+  background_color: [0, 0, 0]
+  overlay_bg_alpha: 140
+  overlay_padding: 24
+  fps: 30
+
+audio:
+  device: null
+  sample_rate: 44100
+  channels: 1
+  sample_seconds: 10
+  gate_rms_threshold: 0.02
+  cooldown_s: 30
+  check_interval_s: 1.0
+
+recognition:
+  provider: audd
+  api_token_env: AUDD_API_TOKEN
+  cache_ttl_s: 3600
+  timeout_s: 15
+
+artwork:
+  cache_dir: ~/.cache/auraframe/art
+  max_cache_mb: 500
+  download_timeout_s: 20
+
+logging:
+  level: INFO
