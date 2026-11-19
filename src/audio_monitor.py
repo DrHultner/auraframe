@@ -4,7 +4,6 @@ import logging
 import threading
 import time
 import wave
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,10 +45,16 @@ class AudioMonitor:
     def __init__(self, config: dict[str, Any]) -> None:
         cfg = config.get("audio", {})
         self._device = cfg.get("device", None)
-        self._sample_rate = int(cfg.get("sample_rate", 44100))
+        # "auto" / null → use device default rate after open
+        rate_cfg = cfg.get("sample_rate", "auto")
+        if rate_cfg in (None, "auto", "null", ""):
+            self._requested_rate: int | None = None
+        else:
+            self._requested_rate = int(rate_cfg)
+        self._sample_rate = int(self._requested_rate or 48000)
         self._channels = int(cfg.get("channels", 1))
         self._sample_seconds = float(cfg.get("sample_seconds", 10))
-        self._block_size = int(cfg.get("block_size", 2048))
+        self._block_size = int(cfg.get("block_size", 4096))
         self._gate_rms = float(cfg.get("gate_rms_threshold", 0.02))
         self._gate_band_ratio = float(cfg.get("gate_band_ratio_min", 0.25))
         self._gate_min_hz = float(cfg.get("gate_min_hz", 200))
@@ -69,8 +74,10 @@ class AudioMonitor:
         self._max_sample_files = int(cfg.get("max_sample_files", 20))
 
         self._buffer_seconds = self._sample_seconds + self._gate_window_s + 1.0
-        self._max_samples = int(self._buffer_seconds * self._sample_rate)
-        self._buffer = deque(maxlen=self._max_samples)
+        self._max_samples = max(1, int(self._buffer_seconds * self._sample_rate))
+        self._ring = np.zeros(self._max_samples, dtype=np.float32)
+        self._write_idx = 0
+        self._filled = 0
         self._lock = threading.Lock()
         self._stream = None
         self._running = False
@@ -80,10 +87,15 @@ class AudioMonitor:
         self._music_hits = 0
         self._last_reading = GateReading(0.0, 0.0, False)
         self._frames_seen = 0
+        self._overflows = 0
 
     @property
     def last_reading(self) -> GateReading:
         return self._last_reading
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
 
     def start(self) -> None:
         if self._running:
@@ -91,30 +103,47 @@ class AudioMonitor:
         self._sample_dir.mkdir(parents=True, exist_ok=True)
         sd = _sounddevice()
         device = self._resolve_device(self._device)
+        rate = self._pick_sample_rate(device)
+
         try:
             self._stream = sd.InputStream(
-                samplerate=self._sample_rate,
+                samplerate=rate,
                 channels=self._channels,
                 dtype=self._dtype,
                 blocksize=self._block_size,
                 device=device,
                 callback=self._on_audio,
+                latency="high",
             )
             self._stream.start()
         except Exception:
             logger.exception(
-                "Failed to open audio input device=%r rate=%s",
+                "Failed to open audio input device=%r rate=%s ch=%s",
                 device,
-                self._sample_rate,
+                rate,
+                self._channels,
             )
             raise
 
+        # Trust the rate PortAudio actually opened
+        actual_rate = int(round(float(self._stream.samplerate)))
+        if actual_rate != rate:
+            logger.warning(
+                "Requested sample_rate=%s but stream opened at %s — using actual",
+                rate,
+                actual_rate,
+            )
+        self._set_sample_rate(actual_rate)
+
         self._running = True
         logger.info(
-            "AudioMonitor started device=%r rate=%s ch=%s gate_rms=%.4f band_min=%.2f",
+            "AudioMonitor started device=%r rate=%s (requested=%s) ch=%s block=%s "
+            "gate_rms=%.4f band_min=%.2f",
             device,
             self._sample_rate,
+            self._requested_rate if self._requested_rate is not None else "auto",
             self._channels,
+            self._block_size,
             self._gate_rms,
             self._gate_band_ratio,
         )
@@ -128,7 +157,7 @@ class AudioMonitor:
             except Exception:
                 logger.debug("Error closing audio stream", exc_info=True)
             self._stream = None
-        logger.info("AudioMonitor stopped")
+        logger.info("AudioMonitor stopped overflows=%s", self._overflows)
 
     def poll(self) -> AudioSample | None:
         """Return a new WAV sample when music is likely and cooldown allows."""
@@ -179,10 +208,11 @@ class AudioMonitor:
             self._last_sample_at = now
             self._cleanup_old_samples()
             logger.info(
-                "Captured sample path=%s duration=%.1fs rms=%.4f",
+                "Captured sample path=%s duration=%.1fs rms=%.4f rate=%s",
                 sample.path,
                 sample.duration_s,
                 sample.rms,
+                self._sample_rate,
             )
         return sample
 
@@ -231,7 +261,8 @@ class AudioMonitor:
             rate = int(wf.getframerate())
             ch = int(wf.getnchannels())
             width = int(wf.getsampwidth())
-            frames = wf.readframes(wf.getnframes())
+            nframes = int(wf.getnframes())
+            frames = wf.readframes(nframes)
         if width != 2:
             raise ValueError(f"Unsupported sample width {width} (want 16-bit)")
         data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
@@ -272,21 +303,72 @@ class AudioMonitor:
             float(stats["rms"]),
             rate,
         )
-        sd.play(data, samplerate=rate)
+        # Ensure shape is (n,) or (n, ch)
+        sd.play(data, samplerate=rate, blocking=False)
         if blocking:
             sd.wait()
         return stats
 
+    def _set_sample_rate(self, rate: int) -> None:
+        rate = int(rate)
+        if rate <= 0:
+            return
+        if rate == self._sample_rate and self._ring.size == self._max_samples:
+            return
+        self._sample_rate = rate
+        self._max_samples = max(1, int(self._buffer_seconds * self._sample_rate))
+        with self._lock:
+            self._ring = np.zeros(self._max_samples, dtype=np.float32)
+            self._write_idx = 0
+            self._filled = 0
+
+    def _pick_sample_rate(self, device: Any) -> int:
+        if self._requested_rate is not None:
+            return int(self._requested_rate)
+        sd = _sounddevice()
+        try:
+            info = sd.query_devices(device, "input")
+            default_rate = int(round(float(info.get("default_samplerate") or 48000)))
+            return default_rate or 48000
+        except Exception:
+            logger.debug("Could not query device default rate", exc_info=True)
+            return 48000
+
     def _on_audio(self, indata: np.ndarray, frames: int, _time: Any, status: Any) -> None:
         if status:
-            logger.warning("Audio status: %s", status)
-        mono = indata.copy()
-        if mono.ndim > 1:
-            mono = mono.mean(axis=1)
+            # input overflow → dropped blocks → garbled audio
+            self._overflows += 1
+            if self._overflows <= 5 or self._overflows % 50 == 0:
+                logger.warning("Audio status: %s (overflows=%s)", status, self._overflows)
+
+        if indata.ndim > 1:
+            # Average channels → true mono (avoids 2x-speed interleaved bug)
+            mono = np.mean(indata, axis=1, dtype=np.float32)
         else:
-            mono = mono.reshape(-1)
+            mono = np.asarray(indata, dtype=np.float32).reshape(-1)
+
+        n = int(mono.shape[0])
+        if n <= 0:
+            return
+
         with self._lock:
-            self._buffer.extend(mono.astype(np.float32, copy=False))
+            ring = self._ring
+            size = ring.size
+            idx = self._write_idx
+            if n >= size:
+                ring[:] = mono[-size:]
+                self._write_idx = 0
+                self._filled = size
+            else:
+                end = idx + n
+                if end <= size:
+                    ring[idx:end] = mono
+                else:
+                    first = size - idx
+                    ring[idx:] = mono[:first]
+                    ring[: end % size] = mono[first:]
+                self._write_idx = end % size
+                self._filled = min(size, self._filled + n)
             self._frames_seen += frames
 
     def _analyze_gate(self) -> GateReading:
@@ -300,7 +382,6 @@ class AudioMonitor:
         return GateReading(rms=rms, band_ratio=band_ratio, music_likely=music)
 
     def _band_energy_ratio(self, samples: np.ndarray) -> float:
-        # Hann window + rFFT; ratio of energy in music-ish band vs total
         n = samples.size
         windowed = samples * np.hanning(n)
         spectrum = np.fft.rfft(windowed)
@@ -315,9 +396,10 @@ class AudioMonitor:
         need = int(self._sample_seconds * self._sample_rate * 0.9)
         if samples.size < need:
             logger.warning(
-                "Not enough audio buffered yet (%s < %s)",
+                "Not enough audio buffered yet (%s < %s) rate=%s",
                 samples.size,
                 need,
+                self._sample_rate,
             )
             return None
 
@@ -331,7 +413,8 @@ class AudioMonitor:
         path = self._sample_dir / f"sample-{ts}.wav"
         self._write_wav(path, samples)
         logger.info(
-            "Sample audio in_peak=%.4f in_rms=%.4f gain=%.1fx out_peak=%.4f out_rms=%.4f",
+            "Sample audio rate=%s in_peak=%.4f in_rms=%.4f gain=%.1fx out_peak=%.4f out_rms=%.4f",
+            self._sample_rate,
             peak_in,
             rms_in,
             gain,
@@ -354,17 +437,26 @@ class AudioMonitor:
         gain = min(self._target_peak / peak, self._max_gain)
         if gain < 1.01:
             return samples, 1.0
-        return (samples * gain).astype(np.float32, copy=False), float(gain)
+        return (samples * np.float32(gain)).astype(np.float32, copy=False), float(gain)
 
     def _get_recent(self, seconds: float) -> np.ndarray:
         n = int(seconds * self._sample_rate)
         with self._lock:
-            if not self._buffer:
+            filled = self._filled
+            if filled <= 0:
                 return np.zeros(0, dtype=np.float32)
-            data = np.fromiter(self._buffer, dtype=np.float32, count=len(self._buffer))
-        if data.size <= n:
-            return data
-        return data[-n:]
+            n = min(n, filled)
+            size = self._ring.size
+            idx = self._write_idx
+            start = (idx - n) % size
+            if start + n <= size:
+                out = self._ring[start : start + n].copy()
+            else:
+                first = size - start
+                out = np.empty(n, dtype=np.float32)
+                out[:first] = self._ring[start:]
+                out[first:] = self._ring[: n - first]
+            return out
 
     def _write_wav(self, path: Path, samples: np.ndarray) -> None:
         clipped = np.clip(samples, -1.0, 1.0)
@@ -372,7 +464,7 @@ class AudioMonitor:
         with wave.open(str(path), "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
-            wf.setframerate(self._sample_rate)
+            wf.setframerate(int(self._sample_rate))
             wf.writeframes(pcm.tobytes())
 
     def _cleanup_old_samples(self) -> None:
@@ -393,7 +485,6 @@ class AudioMonitor:
         text = str(device).strip()
         if text.isdigit():
             return int(text)
-        # Match by substring name
         matches = []
         for row in AudioMonitor.list_devices():
             if text.lower() in str(row["name"]).lower():
@@ -401,7 +492,12 @@ class AudioMonitor:
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            logger.warning("Multiple devices match %r indices=%s; using %s", text, matches, matches[0])
+            logger.warning(
+                "Multiple devices match %r indices=%s; using %s",
+                text,
+                matches,
+                matches[0],
+            )
             return matches[0]
         logger.warning("No input device matched %r; using default", text)
         return None
