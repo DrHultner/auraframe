@@ -5,6 +5,7 @@ import logging
 import signal
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .artwork import ArtworkManager
@@ -45,7 +46,65 @@ def parse_args() -> argparse.Namespace:
         default=2.0,
         help="Seconds before showing demo art",
     )
+    p.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="List audio input devices and exit",
+    )
+    p.add_argument(
+        "--monitor-only",
+        action="store_true",
+        help="Run audio gate only (no display); log samples when music is likely",
+    )
+    p.add_argument(
+        "--audio-demo",
+        action="store_true",
+        help="Enable live audio gate in the main loop (phase 3)",
+    )
     return p.parse_args()
+
+
+def cmd_list_devices() -> int:
+    rows = AudioMonitor.list_devices()
+    if not rows:
+        print("No input devices found.")
+        return 1
+    print(f"{'IDX':>4}  {'CH':>3}  {'RATE':>8}  NAME")
+    for row in rows:
+        print(
+            f"{row['index']:>4}  {row['channels']:>3}  {row['default_rate']:>8.0f}  "
+            f"{row['name']} ({row['hostapi']})"
+        )
+    return 0
+
+
+def run_monitor_only(config: dict, stopping: Callable[[], bool]) -> int:
+    audio = AudioMonitor(config)
+    audio.start()
+    logger.info("Monitor-only mode; Ctrl+C to stop")
+    try:
+        while not stopping():
+            sample = audio.poll()
+            if sample:
+                logger.info(
+                    "SAMPLE ready %s (%.1fs) rms=%.4f band=%.3f",
+                    sample.path,
+                    sample.duration_s,
+                    sample.rms,
+                    sample.band_ratio,
+                )
+            else:
+                reading = audio.last_reading
+                logger.info(
+                    "level rms=%.4f band=%.3f music=%s",
+                    reading.rms,
+                    reading.band_ratio,
+                    reading.music_likely,
+                )
+            time.sleep(0.25)
+    finally:
+        audio.stop()
+    return 0
 
 
 def main() -> int:
@@ -53,13 +112,8 @@ def main() -> int:
     config = load_config(args.config)
     setup_logging(config.get("logging", {}).get("level", "INFO"))
 
-    if args.windowed:
-        config.setdefault("display", {})["fullscreen"] = False
-
-    display = DisplayEngine(config)
-    artwork = ArtworkManager(config)
-    audio = AudioMonitor(config)
-    recognizer = Recognizer(config)
+    if args.list_devices:
+        return cmd_list_devices()
 
     stopping = False
 
@@ -71,8 +125,20 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    if args.monitor_only:
+        return run_monitor_only(config, lambda: stopping)
+
+    if args.windowed:
+        config.setdefault("display", {})["fullscreen"] = False
+
+    display = DisplayEngine(config)
+    artwork = ArtworkManager(config)
+    audio = AudioMonitor(config)
+    recognizer = Recognizer(config)
+
     display.start()
-    audio.start()
+    if args.audio_demo:
+        audio.start()
     display.show_idle()
 
     demo_shown = False
@@ -80,8 +146,9 @@ def main() -> int:
     idle_timeout = float(config.get("display", {}).get("idle_timeout_s", 45))
     last_art_at: float | None = None
     state = "idle"
+    samples_captured = 0
 
-    logger.info("AuraFrame running (phase 2: display + artwork cache)")
+    logger.info("AuraFrame running (phase 3: audio monitor + gate)")
 
     try:
         while not stopping:
@@ -102,7 +169,21 @@ def main() -> int:
                     logger.error("Demo art unavailable: %s", args.demo_art)
                     demo_shown = True
 
-            # Later phases: sample = audio.poll(); recognizer.identify(sample)
+            if args.audio_demo:
+                sample = audio.poll()
+                if sample:
+                    samples_captured += 1
+                    # Phase 3: no recognition yet — flash overlay as proof of gate
+                    display.show_artwork(
+                        Path(config["_assets"]) / "demo_art.png",
+                        TrackInfo(
+                            title=f"Music detected #{samples_captured}",
+                            artist=f"rms={sample.rms:.3f}  {Path(sample.path).name}",
+                        ),
+                    )
+                    last_art_at = time.monotonic()
+                    state = "artwork"
+
             _ = recognizer  # reserved for phase 4+
 
             if state == "artwork" and last_art_at is not None:
@@ -112,7 +193,8 @@ def main() -> int:
                     last_art_at = None
 
     finally:
-        audio.stop()
+        if args.audio_demo:
+            audio.stop()
         display.stop()
 
     logger.info("AuraFrame exited cleanly")
