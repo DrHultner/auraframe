@@ -12,8 +12,8 @@ display:
   fps: 30
 
 audio:
-  device: null          # null | device index | name substring
-  sample_rate: auto     # auto = device default (often 48000 on USB mics)
+  device: "USB PnP Sound Device"  # null | device index | name substring
+  sample_rate: 44100              # auto = device default (often 48000 on USB mics)
   channels: 1
   block_size: 4096      # larger blocks reduce overflow/garble on Pi
   sample_seconds: 12
