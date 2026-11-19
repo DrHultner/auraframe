@@ -42,6 +42,12 @@ Requires `AUDD_API_TOKEN` in the project `.env` (same folder as `config.yaml`).
 ```bash
 # Diagnose token / paths
 auraframe --check
+
+# Inspect / listen to captured samples
+auraframe --list-samples
+auraframe --play-sample           # newest
+auraframe --play-sample 2         # by list index
+auraframe --play-sample ~/.cache/auraframe/samples/sample-XXXX.wav
 ```
 
 Keys: `Esc` or `q` to quit.

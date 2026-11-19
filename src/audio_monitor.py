@@ -213,6 +213,70 @@ class AudioMonitor:
             )
         return rows
 
+    @staticmethod
+    def sample_dir_from_config(config: dict[str, Any]) -> Path:
+        cfg = config.get("audio", {})
+        return Path(cfg.get("sample_dir", "~/.cache/auraframe/samples")).expanduser()
+
+    @classmethod
+    def list_samples(cls, config: dict[str, Any]) -> list[Path]:
+        sample_dir = cls.sample_dir_from_config(config)
+        if not sample_dir.is_dir():
+            return []
+        return sorted(sample_dir.glob("sample-*.wav"), key=lambda p: p.stat().st_mtime)
+
+    @staticmethod
+    def read_wav(path: Path) -> tuple[np.ndarray, int]:
+        with wave.open(str(path), "rb") as wf:
+            rate = int(wf.getframerate())
+            ch = int(wf.getnchannels())
+            width = int(wf.getsampwidth())
+            frames = wf.readframes(wf.getnframes())
+        if width != 2:
+            raise ValueError(f"Unsupported sample width {width} (want 16-bit)")
+        data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        if ch > 1:
+            data = data.reshape(-1, ch)
+        return data, rate
+
+    @classmethod
+    def wav_quality(cls, path: Path) -> dict[str, float | int | str]:
+        data, rate = cls.read_wav(path)
+        mono = data.mean(axis=1) if data.ndim > 1 else data
+        peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+        rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
+        duration = float(mono.size / max(rate, 1))
+        return {
+            "path": str(path),
+            "bytes": path.stat().st_size,
+            "rate": rate,
+            "duration_s": duration,
+            "peak": peak,
+            "rms": rms,
+        }
+
+    @classmethod
+    def play_wav(cls, path: Path, *, blocking: bool = True) -> dict[str, float | int | str]:
+        """Play a WAV on the default output device; return quality stats."""
+        path = Path(path).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        data, rate = cls.read_wav(path)
+        stats = cls.wav_quality(path)
+        sd = _sounddevice()
+        logger.info(
+            "Playing %s duration=%.1fs peak=%.4f rms=%.4f rate=%s",
+            path.name,
+            float(stats["duration_s"]),
+            float(stats["peak"]),
+            float(stats["rms"]),
+            rate,
+        )
+        sd.play(data, samplerate=rate)
+        if blocking:
+            sd.wait()
+        return stats
+
     def _on_audio(self, indata: np.ndarray, frames: int, _time: Any, status: Any) -> None:
         if status:
             logger.warning("Audio status: %s", status)

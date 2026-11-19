@@ -83,7 +83,85 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print config/.env/token diagnostics and exit",
     )
+    p.add_argument(
+        "--list-samples",
+        action="store_true",
+        help="List captured sample WAV files (newest last)",
+    )
+    p.add_argument(
+        "--play-sample",
+        nargs="?",
+        const="latest",
+        default=None,
+        help="Play a sample WAV (path or 'latest' / omit for newest)",
+    )
     return p.parse_args()
+
+
+def cmd_list_samples(config: dict) -> int:
+    samples = AudioMonitor.list_samples(config)
+    sample_dir = AudioMonitor.sample_dir_from_config(config)
+    if not samples:
+        print(f"No samples in {sample_dir}")
+        return 1
+    print(f"Samples in {sample_dir} ({len(samples)}):")
+    print(f"{'#':>3}  {'DURATION':>8}  {'PEAK':>7}  {'RMS':>7}  {'BYTES':>8}  NAME")
+    for i, path in enumerate(samples, start=1):
+        try:
+            q = AudioMonitor.wav_quality(path)
+            print(
+                f"{i:>3}  {float(q['duration_s']):>7.1f}s  {float(q['peak']):>7.4f}  "
+                f"{float(q['rms']):>7.4f}  {int(q['bytes']):>8}  {path.name}"
+            )
+        except Exception as exc:
+            print(f"{i:>3}  {'?':>8}  {'?':>7}  {'?':>7}  {path.stat().st_size:>8}  {path.name}  ({exc})")
+    print("\nPlay newest:  auraframe --play-sample")
+    print("Play file:    auraframe --play-sample /path/to/sample.wav")
+    print("Play by # :   auraframe --play-sample 3")
+    return 0
+
+
+def cmd_play_sample(config: dict, spec: str) -> int:
+    samples = AudioMonitor.list_samples(config)
+    path: Path | None = None
+    text = (spec or "latest").strip()
+
+    if text in {"latest", "last", "newest", ""}:
+        path = samples[-1] if samples else None
+    elif text.isdigit():
+        idx = int(text)
+        if idx < 1 or idx > len(samples):
+            logger.error("Sample #%s out of range (1-%s)", idx, len(samples))
+            return 1
+        path = samples[idx - 1]
+    else:
+        candidate = Path(text).expanduser()
+        path = candidate if candidate.is_file() else None
+        if path is None and samples:
+            # allow bare filename match
+            matches = [p for p in samples if p.name == text or text in p.name]
+            path = matches[-1] if matches else None
+
+    if path is None:
+        logger.error("No sample to play (spec=%r). Run: auraframe --list-samples", text)
+        return 1
+
+    try:
+        stats = AudioMonitor.play_wav(path)
+    except Exception:
+        logger.exception("Playback failed for %s", path)
+        return 1
+
+    print(
+        f"Played {path}\n"
+        f"  duration={float(stats['duration_s']):.1f}s  "
+        f"peak={float(stats['peak']):.4f}  rms={float(stats['rms']):.4f}"
+    )
+    if float(stats["peak"]) < 0.05:
+        print("  note: peak is very low — mic may be too quiet for AudD")
+    elif float(stats["peak"]) > 0.99:
+        print("  note: peak is clipped — lower gain or move mic back")
+    return 0
 
 
 def cmd_check(config: dict) -> int:
@@ -303,6 +381,12 @@ def main() -> int:
 
     if args.check:
         return cmd_check(config)
+
+    if args.list_samples:
+        return cmd_list_samples(config)
+
+    if args.play_sample is not None:
+        return cmd_play_sample(config, args.play_sample)
 
     if args.recognize_file is not None:
         return cmd_recognize_file(
