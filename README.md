@@ -6,7 +6,7 @@ Set-and-forget ambient music display for Raspberry Pi 4. Listens to room audio, 
 
 ## Status
 
-Phase 1: project scaffold + Pygame display engine (idle, artwork, overlay, fade).
+Phase 2: display engine + artwork download/disk cache.
 
 See [AuraFrame_PRD.md](AuraFrame_PRD.md) for full requirements.
 
@@ -25,15 +25,22 @@ cp .env.example .env   # add API tokens later
 # Windowed idle screen (dev)
 python -m src.main --windowed
 
-# Demo: idle → artwork → idle after timeout
+# Demo: local file
 python -m src.main --windowed --demo-art assets/demo_art.png \
   --title "Neon Nights" --artist "Aura Demo" --demo-delay 1.5
+
+# Demo: download + cache from URL
+python -m src.main --windowed \
+  --demo-art "https://picsum.photos/1000/1000.jpg" \
+  --title "Cached Cover" --artist "Aura Demo"
 
 # Fullscreen on target display (Pi)
 python -m src.main
 ```
 
 Keys: `Esc` or `q` to quit.
+
+Artwork cache defaults to `~/.cache/auraframe/art` (see `config.yaml`).
 
 ## Layout
 

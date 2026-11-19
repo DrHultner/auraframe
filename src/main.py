@@ -34,12 +34,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--demo-art",
-        type=Path,
         default=None,
-        help="Show a local image as artwork (phase 1 demo)",
+        help="Local path or URL to show as artwork (demo)",
     )
-    p.add_argument("--title", default="Demo Track", help="Overlay title for --demo-art")
-    p.add_argument("--artist", default="Demo Artist", help="Overlay artist for --demo-art")
+    p.add_argument("--title", default="Demo Track", help="Overlay title for demo art")
+    p.add_argument("--artist", default="Demo Artist", help="Overlay artist for demo art")
     p.add_argument(
         "--demo-delay",
         type=float,
@@ -82,14 +81,13 @@ def main() -> int:
     last_art_at: float | None = None
     state = "idle"
 
-    logger.info("AuraFrame running (phase 1: display + idle)")
+    logger.info("AuraFrame running (phase 2: display + artwork cache)")
 
     try:
         while not stopping:
             if not display.tick():
                 break
 
-            # Phase 1 demo path
             if args.demo_art and not demo_shown and time.monotonic() >= demo_at:
                 path = artwork.ensure(args.demo_art)
                 if path:
@@ -101,7 +99,7 @@ def main() -> int:
                     state = "artwork"
                     demo_shown = True
                 else:
-                    logger.error("Demo art not found: %s", args.demo_art)
+                    logger.error("Demo art unavailable: %s", args.demo_art)
                     demo_shown = True
 
             # Later phases: sample = audio.poll(); recognizer.identify(sample)

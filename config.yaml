@@ -29,7 +29,10 @@ recognition:
 artwork:
   cache_dir: ~/.cache/auraframe/art
   max_cache_mb: 500
+  max_age_days: 30
   download_timeout_s: 20
+  download_retries: 3
+  retry_backoff_s: 0.75
 
 logging:
   level: INFO
