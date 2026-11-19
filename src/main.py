@@ -201,5 +201,9 @@ def main() -> int:
     return 0
 
 
+def cli() -> None:
+    raise SystemExit(main())
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    cli()

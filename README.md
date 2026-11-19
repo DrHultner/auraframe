@@ -16,38 +16,24 @@ See [AuraFrame_PRD.md](AuraFrame_PRD.md) for full requirements.
 # System deps (Debian/Ubuntu/Pi OS)
 sudo apt-get install -y python3-venv portaudio19-dev libportaudio2
 
+cd auraframe
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 cp .env.example .env   # add API tokens later
 ```
+
+After `pip install -e .`, the `auraframe` command is available while the venv is active.
 
 ## Run
 
 ```bash
-# Windowed idle screen (dev)
-python -m src.main --windowed
-
-# Demo: local file
-python -m src.main --windowed --demo-art assets/demo_art.png \
-  --title "Neon Nights" --artist "Aura Demo" --demo-delay 1.5
-
-# Demo: download + cache from URL
-python -m src.main --windowed \
-  --demo-art "https://picsum.photos/1000/1000.jpg" \
-  --title "Cached Cover" --artist "Aura Demo"
-
-# Fullscreen on target display (Pi)
-python -m src.main
-
-# List microphones
-python -m src.main --list-devices
-
-# Audio gate only (no UI) — play music and watch logs / WAV samples
-python -m src.main --monitor-only
-
-# Full UI + live gate demo (shows placeholder art when music detected)
-python -m src.main --windowed --audio-demo
+auraframe --windowed
+auraframe --list-devices
+auraframe --monitor-only
+auraframe --audio-demo
+auraframe --windowed --demo-art assets/demo_art.png \
+  --title "Neon Nights" --artist "Aura Demo"
 ```
 
 Keys: `Esc` or `q` to quit.
@@ -69,7 +55,7 @@ auraframe/
 │   └── config.py
 ├── assets/
 ├── config.yaml
-├── requirements.txt
+├── pyproject.toml
 └── AuraFrame_PRD.md
 ```
 

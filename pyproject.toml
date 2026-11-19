@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auraframe"
+version = "0.3.0"
+description = "Ambient music display appliance for Raspberry Pi"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pygame>=2.5.0",
+  "Pillow>=10.0.0",
+  "PyYAML>=6.0",
+  "python-dotenv>=1.0.0",
+  "requests>=2.31.0",
+  "sounddevice>=0.4.6",
+  "numpy>=1.24.0",
+]
+
+[project.scripts]
+auraframe = "src.main:cli"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
