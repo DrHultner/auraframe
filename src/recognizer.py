@@ -61,7 +61,8 @@ class Recognizer:
         self._provider = str(cfg.get("provider", "audd")).lower()
         self._api_url = str(cfg.get("api_url", "https://api.audd.io/"))
         self._token_env = str(cfg.get("api_token_env", "AUDD_API_TOKEN"))
-        self._token = (os.getenv(self._token_env) or cfg.get("api_token") or "").strip()
+        raw_token = os.getenv(self._token_env) or cfg.get("api_token") or ""
+        self._token = str(raw_token).strip().strip('"').strip("'")
         self._return_meta = str(cfg.get("return_meta", "apple_music,spotify"))
         self._timeout_s = float(cfg.get("timeout_s", 15))
         self._cache_ttl_s = float(cfg.get("cache_ttl_s", 3600))
@@ -153,6 +154,8 @@ class Recognizer:
             "api_token": self._token,
             "return": self._return_meta,
         }
+        size = path.stat().st_size
+        logger.info("Calling AudD api=%s file=%s bytes=%s", self._api_url, path.name, size)
         with path.open("rb") as fh:
             files = {"file": (path.name, fh, "audio/wav")}
             resp = self._session.post(
@@ -161,6 +164,7 @@ class Recognizer:
                 files=files,
                 timeout=self._timeout_s,
             )
+        logger.info("AudD HTTP %s", resp.status_code)
         resp.raise_for_status()
         payload = resp.json()
 

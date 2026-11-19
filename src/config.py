@@ -16,7 +16,9 @@ def _expand_path(value: str) -> Path:
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
+    # Prefer project .env; also allow cwd override for appliance deploys
     load_dotenv(ROOT / ".env")
+    load_dotenv(Path.cwd() / ".env", override=False)
     config_path = path or DEFAULT_CONFIG_PATH
     with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}

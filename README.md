@@ -28,15 +28,16 @@ cp .env.example .env
 
 ```bash
 auraframe --list-devices
-auraframe --monitor-only              # gate only
-auraframe --monitor-only --live       # gate + AudD identify (no UI)
-auraframe --recognize-file ~/sample.wav
+auraframe --monitor-only              # gate + AudD identify (no UI)
+auraframe --recognize-file ~/.cache/auraframe/samples/sample-XXXX.wav
 auraframe --recognize-file ~/sample.wav --show-result --windowed
 
 # Full UI appliance loop
 auraframe --live
 auraframe --live --windowed
 ```
+
+Requires `AUDD_API_TOKEN` in the project `.env` (same folder as `config.yaml`).
 
 Keys: `Esc` or `q` to quit.
 

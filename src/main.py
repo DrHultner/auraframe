@@ -138,15 +138,18 @@ def cmd_recognize_file(config: dict, path: Path, show: bool, windowed: bool) -> 
     return 0
 
 
-def run_monitor_only(config: dict, stopping: Callable[[], bool], recognize: bool) -> int:
+def run_monitor_only(config: dict, stopping: Callable[[], bool]) -> int:
     audio = AudioMonitor(config)
-    recognizer = Recognizer(config) if recognize else None
-    if recognize and recognizer is not None and not recognizer.configured:
-        logger.error("Set AUDD_API_TOKEN in .env for recognition")
+    recognizer = Recognizer(config)
+    if not recognizer.configured:
+        logger.error(
+            "AUDD_API_TOKEN not loaded. Put it in %s/.env or ./.env then restart.",
+            config.get("_root"),
+        )
         return 1
 
     audio.start()
-    logger.info("Monitor-only mode%s; Ctrl+C to stop", " + recognize" if recognize else "")
+    logger.info("Monitor-only mode + recognize; Ctrl+C to stop")
     try:
         while not stopping():
             sample = audio.poll()
@@ -158,15 +161,17 @@ def run_monitor_only(config: dict, stopping: Callable[[], bool], recognize: bool
                     sample.rms,
                     sample.band_ratio,
                 )
-                if recognizer is not None:
-                    result = recognizer.identify(sample)
-                    if result:
-                        logger.info(
-                            "MATCH %s — %s art=%s",
-                            result.track.artist,
-                            result.track.title,
-                            result.artwork_url or "-",
-                        )
+                result = recognizer.identify(sample)
+                if result:
+                    logger.info(
+                        "MATCH %s — %s art=%s cached=%s",
+                        result.track.artist,
+                        result.track.title,
+                        result.artwork_url or "-",
+                        result.cached,
+                    )
+                else:
+                    logger.info("No AudD match for %s", Path(sample.path).name)
             else:
                 reading = audio.last_reading
                 logger.info(
@@ -276,7 +281,7 @@ def main() -> int:
     live = bool(args.live or args.audio_demo)
 
     if args.monitor_only:
-        return run_monitor_only(config, lambda: stopping, recognize=live)
+        return run_monitor_only(config, lambda: stopping)
 
     if args.windowed:
         config.setdefault("display", {})["fullscreen"] = False
