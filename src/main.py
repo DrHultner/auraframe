@@ -4,15 +4,16 @@ import argparse
 import logging
 import signal
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 from .artwork import ArtworkManager
-from .audio_monitor import AudioMonitor
+from .audio_monitor import AudioMonitor, AudioSample
 from .config import load_config
 from .display import DisplayEngine, TrackInfo
-from .recognizer import Recognizer
+from .recognizer import RecognitionResult, Recognizer
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--audio-demo",
         action="store_true",
-        help="Enable live audio gate in the main loop (phase 3)",
+        help="Enable live audio gate + recognition in the main UI loop",
+    )
+    p.add_argument(
+        "--live",
+        action="store_true",
+        help="Full appliance mode: audio + recognize + artwork display",
+    )
+    p.add_argument(
+        "--recognize-file",
+        type=Path,
+        default=None,
+        help="Identify a local WAV/MP3 sample and print the result",
+    )
+    p.add_argument(
+        "--show-result",
+        action="store_true",
+        help="With --recognize-file, also show artwork on the display",
     )
     return p.parse_args()
 
@@ -78,10 +95,58 @@ def cmd_list_devices() -> int:
     return 0
 
 
-def run_monitor_only(config: dict, stopping: Callable[[], bool]) -> int:
+def cmd_recognize_file(config: dict, path: Path, show: bool, windowed: bool) -> int:
+    if not path.is_file():
+        logger.error("File not found: %s", path)
+        return 1
+
+    recognizer = Recognizer(config)
+    if not recognizer.configured:
+        logger.error("Set AUDD_API_TOKEN in .env first")
+        return 1
+
+    sample = AudioSample(path=str(path), duration_s=0.0)
+    result = recognizer.identify(sample)
+    if result is None:
+        print("No match")
+        return 2
+
+    print(f"{result.track.artist} — {result.track.title}")
+    if result.track.album:
+        print(f"Album: {result.track.album}")
+    if result.artwork_url:
+        print(f"Art:   {result.artwork_url}")
+    print(f"Cached: {result.cached}")
+
+    if not show:
+        return 0
+
+    if windowed:
+        config.setdefault("display", {})["fullscreen"] = False
+    artwork = ArtworkManager(config)
+    display = DisplayEngine(config)
+    display.start()
+    try:
+        _apply_result(display, artwork, result)
+        idle_timeout = float(config.get("display", {}).get("idle_timeout_s", 45))
+        end_at = time.monotonic() + idle_timeout
+        while time.monotonic() < end_at:
+            if not display.tick():
+                break
+    finally:
+        display.stop()
+    return 0
+
+
+def run_monitor_only(config: dict, stopping: Callable[[], bool], recognize: bool) -> int:
     audio = AudioMonitor(config)
+    recognizer = Recognizer(config) if recognize else None
+    if recognize and recognizer is not None and not recognizer.configured:
+        logger.error("Set AUDD_API_TOKEN in .env for recognition")
+        return 1
+
     audio.start()
-    logger.info("Monitor-only mode; Ctrl+C to stop")
+    logger.info("Monitor-only mode%s; Ctrl+C to stop", " + recognize" if recognize else "")
     try:
         while not stopping():
             sample = audio.poll()
@@ -93,6 +158,15 @@ def run_monitor_only(config: dict, stopping: Callable[[], bool]) -> int:
                     sample.rms,
                     sample.band_ratio,
                 )
+                if recognizer is not None:
+                    result = recognizer.identify(sample)
+                    if result:
+                        logger.info(
+                            "MATCH %s — %s art=%s",
+                            result.track.artist,
+                            result.track.title,
+                            result.artwork_url or "-",
+                        )
             else:
                 reading = audio.last_reading
                 logger.info(
@@ -107,6 +181,72 @@ def run_monitor_only(config: dict, stopping: Callable[[], bool]) -> int:
     return 0
 
 
+class _IdentifyWorker:
+    """Run recognition off the UI thread."""
+
+    def __init__(self, recognizer: Recognizer) -> None:
+        self._recognizer = recognizer
+        self._lock = threading.Lock()
+        self._busy = False
+        self._result: RecognitionResult | None = None
+        self._last_key: str | None = None
+
+    @property
+    def busy(self) -> bool:
+        with self._lock:
+            return self._busy
+
+    def submit(self, sample: AudioSample) -> bool:
+        with self._lock:
+            if self._busy:
+                return False
+            self._busy = True
+        thread = threading.Thread(target=self._run, args=(sample,), daemon=True)
+        thread.start()
+        return True
+
+    def take_result(self) -> RecognitionResult | None:
+        with self._lock:
+            result = self._result
+            self._result = None
+            return result
+
+    def _run(self, sample: AudioSample) -> None:
+        result = None
+        try:
+            result = self._recognizer.identify(sample)
+        except Exception:
+            logger.exception("Background identify failed")
+        finally:
+            with self._lock:
+                if result is not None:
+                    # Still deliver duplicates so caller can refresh hold timer;
+                    # orchestrator decides whether to re-render.
+                    self._result = result
+                    self._last_key = result.track_key
+                self._busy = False
+
+
+def _apply_result(
+    display: DisplayEngine,
+    artwork: ArtworkManager,
+    result: RecognitionResult,
+) -> bool:
+    path = None
+    if result.artwork_url:
+        path = artwork.ensure(result.artwork_url, result.track)
+    if path is None:
+        # Fallback placeholder so metadata still shows
+        assets = Path(artwork.cache_dir)
+        logger.warning("No artwork available; using idle/demo fallback")
+        demo = Path(__file__).resolve().parent.parent / "assets" / "demo_art.png"
+        path = demo if demo.is_file() else None
+    if path is None:
+        return False
+    display.show_artwork(path, result.track)
+    return True
+
+
 def main() -> int:
     args = parse_args()
     config = load_config(args.config)
@@ -114,6 +254,14 @@ def main() -> int:
 
     if args.list_devices:
         return cmd_list_devices()
+
+    if args.recognize_file is not None:
+        return cmd_recognize_file(
+            config,
+            args.recognize_file,
+            show=args.show_result,
+            windowed=args.windowed,
+        )
 
     stopping = False
 
@@ -125,8 +273,10 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    live = bool(args.live or args.audio_demo)
+
     if args.monitor_only:
-        return run_monitor_only(config, lambda: stopping)
+        return run_monitor_only(config, lambda: stopping, recognize=live)
 
     if args.windowed:
         config.setdefault("display", {})["fullscreen"] = False
@@ -135,9 +285,12 @@ def main() -> int:
     artwork = ArtworkManager(config)
     audio = AudioMonitor(config)
     recognizer = Recognizer(config)
+    worker = _IdentifyWorker(recognizer) if live else None
 
     display.start()
-    if args.audio_demo:
+    if live:
+        if not recognizer.configured:
+            logger.warning("Live mode without API token — gate only, no identify")
         audio.start()
     display.show_idle()
 
@@ -145,10 +298,10 @@ def main() -> int:
     demo_at = time.monotonic() + max(0.0, args.demo_delay)
     idle_timeout = float(config.get("display", {}).get("idle_timeout_s", 45))
     last_art_at: float | None = None
+    last_track_key: str | None = None
     state = "idle"
-    samples_captured = 0
 
-    logger.info("AuraFrame running (phase 3: audio monitor + gate)")
+    logger.info("AuraFrame running (phase 4: recognition%s)", " live" if live else "")
 
     try:
         while not stopping:
@@ -169,31 +322,42 @@ def main() -> int:
                     logger.error("Demo art unavailable: %s", args.demo_art)
                     demo_shown = True
 
-            if args.audio_demo:
+            if live and worker is not None:
                 sample = audio.poll()
-                if sample:
-                    samples_captured += 1
-                    # Phase 3: no recognition yet — flash overlay as proof of gate
+                if sample and recognizer.configured:
+                    if worker.submit(sample):
+                        logger.info("Identify queued for %s", Path(sample.path).name)
+                elif sample and not recognizer.configured:
                     display.show_artwork(
                         Path(config["_assets"]) / "demo_art.png",
                         TrackInfo(
-                            title=f"Music detected #{samples_captured}",
-                            artist=f"rms={sample.rms:.3f}  {Path(sample.path).name}",
+                            title="Music detected",
+                            artist=f"rms={sample.rms:.3f} (no API token)",
                         ),
                     )
                     last_art_at = time.monotonic()
                     state = "artwork"
 
-            _ = recognizer  # reserved for phase 4+
+                result = worker.take_result()
+                if result is not None:
+                    same = last_track_key == result.track_key
+                    last_track_key = result.track_key
+                    last_art_at = time.monotonic()
+                    state = "artwork"
+                    if same:
+                        logger.info("Same track still playing: %s", result.track_key)
+                    else:
+                        _apply_result(display, artwork, result)
 
             if state == "artwork" and last_art_at is not None:
                 if time.monotonic() - last_art_at >= idle_timeout:
                     display.show_idle()
                     state = "idle"
                     last_art_at = None
+                    last_track_key = None
 
     finally:
-        if args.audio_demo:
+        if live:
             audio.stop()
         display.stop()
 

@@ -6,7 +6,7 @@ Set-and-forget ambient music display for Raspberry Pi 4. Listens to room audio, 
 
 ## Status
 
-Phase 3: display + artwork cache + audio monitor / music gate.
+Phase 4: display + artwork cache + audio gate + AudD recognition.
 
 See [AuraFrame_PRD.md](AuraFrame_PRD.md) for full requirements.
 
@@ -20,48 +20,54 @@ cd auraframe
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-cp .env.example .env   # add API tokens later
+cp .env.example .env
+# Edit .env and set AUDD_API_TOKEN=... (https://dashboard.audd.io/)
 ```
-
-After `pip install -e .`, the `auraframe` command is available while the venv is active.
 
 ## Run
 
 ```bash
-auraframe --windowed
 auraframe --list-devices
-auraframe --monitor-only
-auraframe --audio-demo
-auraframe --windowed --demo-art assets/demo_art.png \
-  --title "Neon Nights" --artist "Aura Demo"
+auraframe --monitor-only              # gate only
+auraframe --monitor-only --live       # gate + AudD identify (no UI)
+auraframe --recognize-file ~/sample.wav
+auraframe --recognize-file ~/sample.wav --show-result --windowed
+
+# Full UI appliance loop
+auraframe --live
+auraframe --live --windowed
 ```
 
 Keys: `Esc` or `q` to quit.
 
-Caches: artwork `~/.cache/auraframe/art`, samples `~/.cache/auraframe/samples`.
+## Config notes
 
-Tune the gate in `config.yaml` (`gate_rms_threshold`, `gate_band_ratio_min`, `cooldown_s`). Set `audio.device` to a device index or name substring if the default mic is wrong.
+- `audio.device` — mic index or name substring (`auraframe --list-devices`)
+- `gate_rms_threshold` / `gate_band_ratio_min` — music gate sensitivity
+- `recognition.*` — AudD endpoint, cache TTL, artwork size
+- Secrets: `.env` → `AUDD_API_TOKEN`
+
+Caches:
+- artwork `~/.cache/auraframe/art`
+- samples `~/.cache/auraframe/samples`
+- recognition `~/.cache/auraframe/recognition`
 
 ## Layout
 
 ```text
 auraframe/
 ├── src/
-│   ├── main.py            # entry + orchestrator
-│   ├── display.py         # Pygame fullscreen UI
-│   ├── audio_monitor.py   # capture + music gate
-│   ├── recognizer.py      # stub (phase 4)
-│   ├── artwork.py         # download + disk cache
+│   ├── main.py
+│   ├── display.py
+│   ├── audio_monitor.py
+│   ├── recognizer.py
+│   ├── artwork.py
 │   └── config.py
 ├── assets/
 ├── config.yaml
 ├── pyproject.toml
 └── AuraFrame_PRD.md
 ```
-
-## Config
-
-Edit `config.yaml` for resolution, fade, overlay, and timeouts. Secrets go in `.env`.
 
 ## License
 

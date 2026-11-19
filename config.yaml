@@ -30,9 +30,13 @@ audio:
 
 recognition:
   provider: audd
+  api_url: https://api.audd.io/
   api_token_env: AUDD_API_TOKEN
+  return_meta: apple_music,spotify
+  cache_dir: ~/.cache/auraframe/recognition
   cache_ttl_s: 3600
   timeout_s: 15
+  artwork_size: 1000
 
 artwork:
   cache_dir: ~/.cache/auraframe/art
