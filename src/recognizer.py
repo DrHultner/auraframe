@@ -65,10 +65,24 @@ class RecognitionResult:
     provider: str = ""
     raw: dict[str, Any] | None = None
     cached: bool = False
+    timecode_s: float | None = None
+    duration_s: float | None = None
+    end_margin_s: float = 5.0
+    default_remaining_s: float = 180.0
 
     @property
     def track_key(self) -> str:
         return f"{self.track.artist.strip().lower()}|{self.track.title.strip().lower()}"
+
+    @property
+    def remaining_s(self) -> float:
+        """Seconds to wait until the track is predicted to end."""
+        if self.duration_s is not None and self.timecode_s is not None:
+            left = float(self.duration_s) - float(self.timecode_s)
+            return max(5.0, left + float(self.end_margin_s))
+        if self.duration_s is not None:
+            return max(5.0, float(self.duration_s) + float(self.end_margin_s))
+        return max(5.0, float(self.default_remaining_s))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +90,10 @@ class RecognitionResult:
             "artwork_url": self.artwork_url,
             "provider": self.provider,
             "raw": self.raw,
+            "timecode_s": self.timecode_s,
+            "duration_s": self.duration_s,
+            "end_margin_s": self.end_margin_s,
+            "default_remaining_s": self.default_remaining_s,
         }
 
     @classmethod
@@ -91,7 +109,43 @@ class RecognitionResult:
             provider=str(data.get("provider") or ""),
             raw=data.get("raw"),
             cached=cached,
+            timecode_s=_as_optional_float(data.get("timecode_s")),
+            duration_s=_as_optional_float(data.get("duration_s")),
+            end_margin_s=float(data.get("end_margin_s") or 5.0),
+            default_remaining_s=float(data.get("default_remaining_s") or 180.0),
         )
+
+
+def _as_optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_timecode(value: Any) -> float | None:
+    """Parse AudD timecode like '02:32' or '1:02:03' to seconds."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    parts = text.split(":")
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == 1:
+        return nums[0]
+    if len(nums) == 2:
+        return nums[0] * 60.0 + nums[1]
+    if len(nums) == 3:
+        return nums[0] * 3600.0 + nums[1] * 60.0 + nums[2]
+    return None
 
 
 class Recognizer:
@@ -108,6 +162,8 @@ class Recognizer:
         self._timeout_s = float(cfg.get("timeout_s", 15))
         self._cache_ttl_s = float(cfg.get("cache_ttl_s", 3600))
         self._artwork_size = int(cfg.get("artwork_size", 1000))
+        self._end_margin_s = float(cfg.get("end_margin_s", 5.0))
+        self._default_remaining_s = float(cfg.get("default_remaining_s", 180.0))
         cache_dir = cfg.get("cache_dir", "~/.cache/auraframe/recognition")
         self._cache_dir = Path(cache_dir).expanduser()
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -410,13 +466,47 @@ class Recognizer:
             album = str(apple.get("albumName") or "").strip()
 
         artwork_url = self._extract_artwork_url(result)
-        return RecognitionResult(
+        timecode_s = parse_timecode(result.get("timecode"))
+        duration_s = self._extract_duration_s(result)
+        parsed = RecognitionResult(
             track=TrackInfo(title=title, artist=artist, album=album),
             artwork_url=artwork_url,
             provider="audd",
             raw=result,
             cached=False,
+            timecode_s=timecode_s,
+            duration_s=duration_s,
+            end_margin_s=self._end_margin_s,
+            default_remaining_s=self._default_remaining_s,
         )
+        logger.info(
+            "AudD timing timecode=%ss duration=%ss remaining=%.1fs",
+            f"{timecode_s:.1f}" if timecode_s is not None else "?",
+            f"{duration_s:.1f}" if duration_s is not None else "?",
+            parsed.remaining_s,
+        )
+        return parsed
+
+    @staticmethod
+    def _extract_duration_s(result: dict[str, Any]) -> float | None:
+        apple = result.get("apple_music") or {}
+        if apple.get("durationInMillis") is not None:
+            try:
+                return float(apple["durationInMillis"]) / 1000.0
+            except (TypeError, ValueError):
+                pass
+        spotify = result.get("spotify") or {}
+        if spotify.get("duration_ms") is not None:
+            try:
+                return float(spotify["duration_ms"]) / 1000.0
+            except (TypeError, ValueError):
+                pass
+        if result.get("duration_ms") is not None:
+            try:
+                return float(result["duration_ms"]) / 1000.0
+            except (TypeError, ValueError):
+                pass
+        return None
 
     def _extract_artwork_url(self, result: dict[str, Any]) -> str | None:
         apple = result.get("apple_music") or {}

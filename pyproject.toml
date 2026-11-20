@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auraframe"
-version = "0.4.0"
+version = "0.5.0"
 description = "Ambient music display appliance for Raspberry Pi"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,6 +16,7 @@ dependencies = [
   "requests>=2.31.0",
   "sounddevice>=0.4.6",
   "numpy>=1.24.0",
+  "tensorflow>=2.15.0; platform_machine == 'x86_64'",
 ]
 
 [project.scripts]

@@ -4,9 +4,9 @@ display:
   fullscreen: true
   overlay: true
   fade_ms: 400
-  # Keep album art until a different track is recognized (ignore idle_timeout_s for live matches)
+  # Artwork stays on screen during hold; next ID replaces it
   hold_until_next_track: true
-  idle_timeout_s: 45   # used only when hold_until_next_track is false (or demo-art mode)
+  idle_timeout_s: 45   # demo-art only
   idle_color: [12, 12, 18]
   background_color: [0, 0, 0]
   overlay_bg_alpha: 140
@@ -15,24 +15,30 @@ display:
 
 audio:
   device: "USB PnP Sound Device"  # null | device index | name substring
-  sample_rate: 44100              # auto = device default (often 48000 on USB mics)
+  sample_rate: 44100              # auto = device default
   channels: 1
-  block_size: 4096      # larger blocks reduce overflow/garble on Pi
-  sample_seconds: 12
+  block_size: 4096
+  sample_seconds: 10              # fixed capture window for YAMNet + AudD
+  normalize: true
+  target_peak: 0.9
+  max_gain: 40.0
+  sample_dir: ~/.cache/auraframe/samples
+  max_sample_files: 20
+  # legacy energy gate (unused by YAMNet live loop)
   gate_window_s: 1.5
   gate_rms_threshold: 0.02
   gate_band_ratio_min: 0.25
   gate_min_hz: 200
   gate_max_hz: 5000
-  gate_hits_required: 3   # sustained music before capture
-  normalize: true         # boost quiet ambient mic levels for AudD
-  target_peak: 0.9
-  max_gain: 40.0
+  gate_hits_required: 3
   cooldown_s: 30
   check_interval_s: 1.0
   silence_interval_s: 2.5
-  sample_dir: ~/.cache/auraframe/samples
-  max_sample_files: 20
+
+yamnet:
+  music_threshold: 0.35
+  hop_s: 0.48
+  # model auto-downloaded to assets/models/ on first run if missing
 
 recognition:
   provider: audd
@@ -43,6 +49,8 @@ recognition:
   cache_ttl_s: 3600
   timeout_s: 15
   artwork_size: 1000
+  end_margin_s: 5          # extra wait after predicted song end
+  default_remaining_s: 180 # fallback hold if duration unknown
 
 artwork:
   cache_dir: ~/.cache/auraframe/art

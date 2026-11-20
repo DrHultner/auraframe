@@ -159,8 +159,54 @@ class AudioMonitor:
             self._stream = None
         logger.info("AudioMonitor stopped overflows=%s", self._overflows)
 
+    def buffered_seconds(self) -> float:
+        with self._lock:
+            return float(self._filled) / float(max(self._sample_rate, 1))
+
+    def export_window(self, seconds: float | None = None) -> AudioSample | None:
+        """Export the most recent N seconds as a normalized WAV (no RMS gate)."""
+        if not self._running:
+            return None
+        seconds = float(seconds if seconds is not None else self._sample_seconds)
+        need = int(seconds * self._sample_rate * 0.95)
+        samples = self._get_recent(seconds)
+        if samples.size < need:
+            logger.debug(
+                "export_window waiting buffer=%.1fs need=%.1fs",
+                samples.size / float(max(self._sample_rate, 1)),
+                seconds,
+            )
+            return None
+
+        reading = GateReading(0.0, 0.0, True)
+        peak_in = float(np.max(np.abs(samples))) if samples.size else 0.0
+        rms_in = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+        samples, gain = self._normalize_audio(samples)
+        peak_out = float(np.max(np.abs(samples))) if samples.size else 0.0
+        rms_out = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        path = self._sample_dir / f"sample-{ts}.wav"
+        self._write_wav(path, samples)
+        self._cleanup_old_samples()
+        self._last_sample_at = time.monotonic()
+        logger.info(
+            "Exported window path=%s rate=%s dur=%.1fs in_peak=%.4f gain=%.1fx out_peak=%.4f",
+            path.name,
+            self._sample_rate,
+            samples.size / float(self._sample_rate),
+            peak_in,
+            gain,
+            peak_out,
+        )
+        return AudioSample(
+            path=str(path),
+            duration_s=samples.size / float(self._sample_rate),
+            rms=rms_out if rms_out > 0 else rms_in,
+            band_ratio=reading.band_ratio,
+        )
+
     def poll(self) -> AudioSample | None:
-        """Return a new WAV sample when music is likely and cooldown allows."""
+        """Legacy energy-gate capture (unused by YAMNet live loop)."""
         if not self._running:
             return None
 

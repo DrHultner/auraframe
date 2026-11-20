@@ -34,6 +34,9 @@ artwork_cache/
 *.raw
 samples/
 
+# Large ML weights (auto-downloaded on first run)
+assets/models/*.tflite
+
 # Pygame / SDL
 .pygame/
 

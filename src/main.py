@@ -14,6 +14,7 @@ from .audio_monitor import AudioMonitor, AudioSample
 from .config import describe_env, load_config
 from .display import DisplayEngine, TrackInfo
 from .recognizer import RecognitionResult, Recognizer
+from .yamnet_gate import YamnetGate
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +244,7 @@ def cmd_recognize_file(config: dict, path: Path, show: bool, windowed: bool) -> 
 
 
 def run_monitor_only(config: dict, stopping: Callable[[], bool]) -> int:
+    """Headless loop: capture → YAMNet → AudD → wait until track end."""
     audio = AudioMonitor(config)
     recognizer = Recognizer(config)
     if not recognizer.configured:
@@ -251,40 +253,49 @@ def run_monitor_only(config: dict, stopping: Callable[[], bool]) -> int:
             config.get("_root"),
         )
         return 1
+    try:
+        yamnet = YamnetGate(config)
+    except Exception:
+        logger.exception("Failed to init YAMNet")
+        return 1
 
+    sample_s = float(config.get("audio", {}).get("sample_seconds", 10))
     audio.start()
-    logger.info("Monitor-only mode + recognize; Ctrl+C to stop")
+    logger.info(
+        "Monitor-only YAMNet loop sample_s=%.1f; Ctrl+C to stop",
+        sample_s,
+    )
+    capture_started = time.monotonic()
     try:
         while not stopping():
-            sample = audio.poll()
-            if sample:
-                logger.info(
-                    "SAMPLE ready %s (%.1fs) rms=%.4f band=%.3f",
-                    sample.path,
-                    sample.duration_s,
-                    sample.rms,
-                    sample.band_ratio,
-                )
-                result = recognizer.identify(sample)
-                if result:
-                    logger.info(
-                        "MATCH %s — %s art=%s cached=%s",
-                        result.track.artist,
-                        result.track.title,
-                        result.artwork_url or "-",
-                        result.cached,
-                    )
-                else:
-                    logger.info("No AudD match for %s", Path(sample.path).name)
-            else:
-                reading = audio.last_reading
-                logger.info(
-                    "level rms=%.4f band=%.3f music=%s",
-                    reading.rms,
-                    reading.band_ratio,
-                    reading.music_likely,
-                )
-            time.sleep(0.25)
+            if time.monotonic() - capture_started < sample_s:
+                time.sleep(0.2)
+                continue
+            sample = audio.export_window(sample_s)
+            capture_started = time.monotonic()
+            if sample is None:
+                continue
+            decision = yamnet.evaluate_wav(sample.path, sample_rate=audio.sample_rate)
+            if not decision.is_music:
+                logger.info("No music in window (score=%.3f) — recapture", decision.score)
+                continue
+            result = recognizer.identify(sample)
+            if result is None:
+                logger.info("Music detected but AudD no match — recapture")
+                continue
+            logger.info(
+                "MATCH %s — %s remaining=%.1fs",
+                result.track.artist,
+                result.track.title,
+                result.remaining_s,
+            )
+            hold_until = time.monotonic() + result.remaining_s
+            while not stopping() and time.monotonic() < hold_until:
+                left = hold_until - time.monotonic()
+                if int(left) % 30 == 0:
+                    logger.info("Holding until track end (%.0fs left)", left)
+                time.sleep(1.0)
+            capture_started = time.monotonic()
     finally:
         audio.stop()
     return 0
@@ -419,6 +430,8 @@ def main() -> int:
     audio = AudioMonitor(config)
     recognizer = Recognizer(config)
     worker = _IdentifyWorker(recognizer) if live else None
+    yamnet: YamnetGate | None = None
+    sample_s = float(config.get("audio", {}).get("sample_seconds", 10))
 
     display.start()
     if live:
@@ -428,7 +441,13 @@ def main() -> int:
                 "Run: auraframe --check"
             )
         else:
-            logger.info("Live recognition enabled")
+            logger.info("Live recognition enabled (YAMNet → AudD → hold to track end)")
+        try:
+            yamnet = YamnetGate(config)
+        except Exception:
+            logger.exception("YAMNet init failed")
+            display.stop()
+            return 1
         audio.start()
     display.show_idle()
 
@@ -436,16 +455,19 @@ def main() -> int:
     demo_at = time.monotonic() + max(0.0, args.demo_delay)
     display_cfg = config.get("display", {})
     idle_timeout = float(display_cfg.get("idle_timeout_s", 45))
-    hold_until_next = bool(display_cfg.get("hold_until_next_track", True))
-    last_art_at: float | None = None
+
+    # Live state machine: capture → yamnet → identify → hold
+    phase = "capture"
+    capture_started = time.monotonic()
+    hold_until: float | None = None
     last_track_key: str | None = None
-    state = "idle"
-    art_is_recognized = False  # True once we show a real AudD match
+    last_art_at: float | None = None
+    demo_mode = False
 
     logger.info(
-        "AuraFrame running live=%s hold_until_next_track=%s root=%s",
+        "AuraFrame running live=%s sample_s=%.1f root=%s",
         live,
-        hold_until_next,
+        sample_s,
         config.get("_root"),
     )
 
@@ -453,73 +475,82 @@ def main() -> int:
         while not stopping:
             if not display.tick():
                 break
+            now = time.monotonic()
 
-            if args.demo_art and not demo_shown and time.monotonic() >= demo_at:
+            if args.demo_art and not demo_shown and now >= demo_at:
                 path = artwork.ensure(args.demo_art)
                 if path:
                     display.show_artwork(
                         path,
                         TrackInfo(title=args.title, artist=args.artist),
                     )
-                    last_art_at = time.monotonic()
-                    state = "artwork"
-                    art_is_recognized = False
+                    last_art_at = now
+                    demo_mode = True
                     demo_shown = True
                 else:
                     logger.error("Demo art unavailable: %s", args.demo_art)
                     demo_shown = True
 
-            if live and worker is not None:
-                sample = audio.poll()
-                if sample and recognizer.configured:
-                    worker.submit(sample)
-                elif sample and not recognizer.configured:
-                    logger.error(
-                        "Sample captured but token missing; skip AudD (%s)",
-                        sample.path,
-                    )
-                    display.show_artwork(
-                        Path(config["_assets"]) / "demo_art.png",
-                        TrackInfo(
-                            title="Music detected",
-                            artist="no API token — run auraframe --check",
-                        ),
-                    )
-                    last_art_at = time.monotonic()
-                    state = "artwork"
-                    art_is_recognized = False
-
-                result = worker.take_result()
-                if result is not None:
-                    same = last_track_key == result.track_key
-                    last_art_at = time.monotonic()
-                    state = "artwork"
-                    if same:
-                        logger.info("Same track still playing: %s", result.track_key)
-                    else:
-                        last_track_key = result.track_key
-                        if _apply_result(display, artwork, result):
-                            art_is_recognized = True
-                            logger.info(
-                                "Holding artwork until next track (%s — %s)",
-                                result.track.artist,
-                                result.track.title,
+            if live and worker is not None and yamnet is not None and recognizer.configured:
+                if phase == "capture":
+                    if now - capture_started >= sample_s:
+                        sample = audio.export_window(sample_s)
+                        if sample is None:
+                            # buffer still filling; keep waiting a bit
+                            capture_started = now - sample_s + 1.0
+                        else:
+                            logger.info("Window ready %s — running YAMNet", Path(sample.path).name)
+                            decision = yamnet.evaluate_wav(
+                                sample.path, sample_rate=audio.sample_rate
                             )
-                elif worker.take_miss():
-                    logger.info("Identify finished with no match")
+                            if decision.is_music:
+                                worker.submit(sample)
+                                phase = "identify"
+                            else:
+                                logger.info(
+                                    "YAMNet: no music (%.3f) — next window",
+                                    decision.score,
+                                )
+                                capture_started = time.monotonic()
+                                phase = "capture"
+                elif phase == "identify":
+                    result = worker.take_result()
+                    if result is not None:
+                        if last_track_key == result.track_key:
+                            logger.info("Same track re-id: %s — refresh hold", result.track_key)
+                        else:
+                            last_track_key = result.track_key
+                            _apply_result(display, artwork, result)
+                        hold_until = time.monotonic() + result.remaining_s
+                        demo_mode = False
+                        last_art_at = time.monotonic()
+                        phase = "hold"
+                        logger.info(
+                            "HOLD %s — %s for %.1fs (timecode=%s duration=%s)",
+                            result.track.artist,
+                            result.track.title,
+                            result.remaining_s,
+                            result.timecode_s,
+                            result.duration_s,
+                        )
+                    elif worker.take_miss():
+                        logger.info("AudD miss — capture next window")
+                        capture_started = time.monotonic()
+                        phase = "capture"
+                elif phase == "hold":
+                    if hold_until is not None and now >= hold_until:
+                        logger.info("Track hold elapsed — resume capture")
+                        hold_until = None
+                        capture_started = time.monotonic()
+                        phase = "capture"
+                        # keep artwork on screen until next successful ID
 
-            # Recognized art stays up until a different track is identified.
-            # Timeout only applies to demo / non-recognized art, or if hold is disabled.
-            if state == "artwork" and last_art_at is not None:
-                should_timeout = idle_timeout > 0 and (
-                    not hold_until_next or not art_is_recognized
-                )
-                if should_timeout and time.monotonic() - last_art_at >= idle_timeout:
+            # Demo-art timeout only
+            if demo_mode and last_art_at is not None and idle_timeout > 0:
+                if now - last_art_at >= idle_timeout:
                     display.show_idle()
-                    state = "idle"
+                    demo_mode = False
                     last_art_at = None
-                    last_track_key = None
-                    art_is_recognized = False
 
     finally:
         if live:

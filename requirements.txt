@@ -5,3 +5,7 @@ python-dotenv>=1.0.0
 requests>=2.31.0
 sounddevice>=0.4.6
 numpy>=1.24.0
+# YAMNet TFLite: prefer lightweight runtime on Pi when available
+# tflite-runtime | ai-edge-litert | tensorflow
+tensorflow>=2.15.0; platform_machine == "x86_64"
+

@@ -1,14 +1,20 @@
 # AuraFrame
 
-Set-and-forget ambient music display for Raspberry Pi 4. Listens to room audio, identifies the track, and shows album artwork full-screen.
+Set-and-forget ambient music display for Raspberry Pi 4. Captures room audio, checks for music with **YAMNet**, identifies the track with **AudD**, and shows album artwork until the track is predicted to end.
 
 **Target hardware:** Raspberry Pi 4 Model B (4 GB) + 14" 1920×1200 HDMI display
 
 ## Status
 
-Phase 4: display + artwork cache + audio gate + AudD recognition.
+Phase 5 logic: fixed window capture → YAMNet → AudD → hold to track end.
 
-See [AuraFrame_PRD.md](AuraFrame_PRD.md) for full requirements.
+## Loop
+
+1. Capture **10 s** of mic audio  
+2. **YAMNet** scores music content  
+3. If music → **AudD** identify  
+4. On match → show artwork; wait `duration - timecode + margin`  
+5. When hold ends → capture again  
 
 ## Setup
 
@@ -20,66 +26,39 @@ cd auraframe
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+
+# Pi: prefer lightweight TFLite if available for your Python/arch, else tensorflow
+# pip install tflite-runtime
+# or: pip install tensorflow
+
 cp .env.example .env
-# Edit .env and set AUDD_API_TOKEN=... (https://dashboard.audd.io/)
+# AUDD_API_TOKEN=...
 ```
+
+YAMNet model downloads automatically to `assets/models/yamnet.tflite` on first run.
 
 ## Run
 
 ```bash
-auraframe --list-devices
-auraframe --monitor-only              # gate + AudD identify (no UI)
-auraframe --recognize-file ~/.cache/auraframe/samples/sample-XXXX.wav
-auraframe --recognize-file ~/sample.wav --show-result --windowed
-
-# Full UI appliance loop
-auraframe --live
-auraframe --live --windowed
-```
-
-Requires `AUDD_API_TOKEN` in the project `.env` (same folder as `config.yaml`).
-
-```bash
-# Diagnose token / paths
 auraframe --check
+auraframe --list-devices
+auraframe --live                 # full UI loop
+auraframe --live --windowed
+auraframe --monitor-only         # headless YAMNet+AudD loop
 
-# Inspect / listen to captured samples
 auraframe --list-samples
-auraframe --play-sample           # newest
-auraframe --play-sample 2         # by list index
-auraframe --play-sample ~/.cache/auraframe/samples/sample-XXXX.wav
+auraframe --play-sample
+auraframe --recognize-file ~/.cache/auraframe/samples/sample-XXXX.wav
 ```
 
-Keys: `Esc` or `q` to quit.
+## Config
 
-## Config notes
+See `config.yaml`:
 
-- `audio.device` — mic index or name substring (`auraframe --list-devices`)
-- `gate_rms_threshold` / `gate_band_ratio_min` — music gate sensitivity
-- `recognition.*` — AudD endpoint, cache TTL, artwork size
-- Secrets: `.env` → `AUDD_API_TOKEN`
-
-Caches:
-- artwork `~/.cache/auraframe/art`
-- samples `~/.cache/auraframe/samples`
-- recognition `~/.cache/auraframe/recognition`
-
-## Layout
-
-```text
-auraframe/
-├── src/
-│   ├── main.py
-│   ├── display.py
-│   ├── audio_monitor.py
-│   ├── recognizer.py
-│   ├── artwork.py
-│   └── config.py
-├── assets/
-├── config.yaml
-├── pyproject.toml
-└── AuraFrame_PRD.md
-```
+- `audio.sample_seconds` — capture window (10)  
+- `yamnet.music_threshold` — music confidence (default 0.35)  
+- `recognition.end_margin_s` — extra wait after predicted end  
+- `audio.device` / `sample_rate` — mic selection  
 
 ## License
 
