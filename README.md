@@ -59,6 +59,13 @@ See `config.yaml`:
 - `yamnet.music_threshold` — music confidence (default 0.35)  
 - `recognition.end_margin_s` — extra wait after predicted end  
 - `audio.device` / `sample_rate` — mic selection  
+- `artwork.sources` — album art lookup order: `itunes`, `musicbrainz`, `spotify`, `audd`
+
+Optional Spotify art (client credentials) in `.env`:
+```bash
+SPOTIFY_CLIENT_ID=...
+SPOTIFY_CLIENT_SECRET=...
+```  
 
 ## License
 

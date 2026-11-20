@@ -13,6 +13,9 @@ from urllib.parse import urlparse
 import requests
 from PIL import Image
 
+from .artwork_lookup import ArtworkLookup
+from .display import TrackInfo
+
 logger = logging.getLogger(__name__)
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
@@ -41,10 +44,12 @@ class ArtworkManager:
         self._session = requests.Session()
         self._session.headers.update(
             {
-                "User-Agent": "AuraFrame/0.1 (+https://github.com/DrHultner/auraframe)",
+                "User-Agent": "AuraFrame/0.5 (+https://github.com/DrHultner/auraframe)",
                 "Accept": "image/*,*/*;q=0.8",
             }
         )
+        self._lookup = ArtworkLookup(config)
+        self._min_match_score = float(art_cfg.get("min_match_score", 0.45))
         self._last_path: Path | None = None
         logger.info(
             "Artwork cache dir=%s max_mb=%s max_age_days=%s",
@@ -78,6 +83,74 @@ class ArtworkManager:
             self._touch(path)
             self._last_path = path
         return path
+
+    def resolve_track(
+        self,
+        track: TrackInfo,
+        preferred_url: str | None = None,
+    ) -> Path | None:
+        """Find the best album cover for a track via iTunes/MB/Spotify, then cache it."""
+        track_key = self._track_cache_key(track)
+        cached = self._find_cached(track_key)
+        if cached is not None:
+            logger.info("Artwork track-cache hit %s (%s)", cached.name, track_key[:12])
+            self._touch(cached)
+            self._last_path = cached
+            return cached
+
+        hit = self._lookup.resolve(track, preferred_url=preferred_url)
+        if hit is None or hit.score < self._min_match_score:
+            if preferred_url:
+                logger.warning(
+                    "Lookup score too low (%.2f); trying preferred URL only",
+                    hit.score if hit else -1.0,
+                )
+                path = self.ensure(preferred_url, track)
+                if path is not None:
+                    # also alias under track key for next time
+                    self._alias_to_track_key(path, track_key)
+                return path
+            return None
+
+        path = self._ensure_url(hit.url)
+        if path is None:
+            return None
+        aliased = self._alias_to_track_key(path, track_key)
+        final = aliased or path
+        self._touch(final)
+        self._last_path = final
+        logger.info(
+            "Resolved artwork source=%s score=%.2f track=%s — %s file=%s",
+            hit.source,
+            hit.score,
+            track.artist,
+            track.title,
+            final.name,
+        )
+        return final
+
+    def _alias_to_track_key(self, path: Path, track_key: str) -> Path | None:
+        """Copy/link downloaded art under a stable track-key filename."""
+        ext = path.suffix or ".jpg"
+        dest = self._cache_dir / f"{track_key}{ext}"
+        if dest.resolve() == path.resolve():
+            return dest
+        try:
+            if not dest.exists():
+                # hardlink if possible else copy bytes
+                try:
+                    os.link(path, dest)
+                except OSError:
+                    dest.write_bytes(path.read_bytes())
+            return dest
+        except OSError:
+            logger.debug("Could not alias artwork to %s", dest, exc_info=True)
+            return None
+
+    @staticmethod
+    def _track_cache_key(track: TrackInfo) -> str:
+        raw = f"{track.artist.strip().lower()}|{track.album.strip().lower()}|{track.title.strip().lower()}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def get_cached(self, source: str | Path) -> Path | None:
         """Return cached file for URL/path if present, without downloading."""

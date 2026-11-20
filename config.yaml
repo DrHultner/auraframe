@@ -59,6 +59,14 @@ artwork:
   download_timeout_s: 20
   download_retries: 3
   retry_backoff_s: 0.75
+  # Multi-source album art lookup (order matters)
+  sources: [itunes, musicbrainz, spotify, audd]
+  preferred_size: 1200
+  min_match_score: 0.45
+  lookup_timeout_s: 12
+  # Optional Spotify Web API (client credentials)
+  spotify_client_id_env: SPOTIFY_CLIENT_ID
+  spotify_client_secret_env: SPOTIFY_CLIENT_SECRET
 
 logging:
   level: INFO

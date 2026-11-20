@@ -367,12 +367,8 @@ def _apply_result(
     artwork: ArtworkManager,
     result: RecognitionResult,
 ) -> bool:
-    path = None
-    if result.artwork_url:
-        path = artwork.ensure(result.artwork_url, result.track)
+    path = artwork.resolve_track(result.track, preferred_url=result.artwork_url)
     if path is None:
-        # Fallback placeholder so metadata still shows
-        assets = Path(artwork.cache_dir)
         logger.warning("No artwork available; using idle/demo fallback")
         demo = Path(__file__).resolve().parent.parent / "assets" / "demo_art.png"
         path = demo if demo.is_file() else None
